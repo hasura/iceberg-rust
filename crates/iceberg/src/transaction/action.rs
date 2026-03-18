@@ -33,10 +33,66 @@ pub(crate) type BoxedTransactionAction = Arc<dyn TransactionAction>;
 /// Implementors of this trait define how a specific action is committed to a table.
 /// Each action is responsible for generating the updates and requirements needed
 /// to modify the table metadata.
+///
+/// # Overview
+///
+/// `TransactionAction` is the core abstraction for operations that modify Iceberg tables.
+/// Actions are applied to a [`Transaction`] using the [`ApplyTransactionAction`] trait,
+/// and when the transaction is committed, each action's `commit` method is called in sequence
+/// to generate the necessary table updates and requirements.
+///
+/// # Built-in Actions
+///
+/// The library provides several built-in actions:
+/// - `FastAppendAction` - Appends data files without rewriting existing manifests
+/// - `UpdateLocationAction` - Updates the table's metadata location
+/// - `UpdatePropertiesAction` - Updates table properties
+/// - `UpdateStatisticsAction` - Updates table statistics
+/// - `UpgradeFormatVersionAction` - Upgrades the table format version
+/// - `ReplaceSortOrderAction` - Replaces the table's sort order
+///
+/// # Custom Actions
+///
+/// You can implement this trait to create custom table operations. Your implementation
+/// should generate appropriate [`TableUpdate`]s and [`TableRequirement`]s based on the
+/// desired changes.
+///
+/// # Example
+///
+/// ```ignore
+/// use std::sync::Arc;
+/// use async_trait::async_trait;
+/// use iceberg::transaction::action::{ActionCommit, TransactionAction};
+/// use iceberg::table::Table;
+/// use iceberg::{Result, TableUpdate};
+///
+/// struct MyCustomAction {
+///     // action-specific fields
+/// }
+///
+/// #[async_trait]
+/// impl TransactionAction for MyCustomAction {
+///     async fn commit(self: Arc<Self>, table: &Table) -> Result<ActionCommit> {
+///         // Generate updates based on the action
+///         let updates = vec![
+///             TableUpdate::SetProperties {
+///                 updates: [("my.property".to_string(), "value".to_string())]
+///                     .into_iter()
+///                     .collect(),
+///             }
+///         ];
+///
+///         Ok(ActionCommit::new(updates, vec![]))
+///     }
+/// }
+/// ```
 #[async_trait]
-pub(crate) trait TransactionAction: AsAny + Sync + Send {
+pub trait TransactionAction: AsAny + Sync + Send {
     /// Commits this action against the provided table and returns the resulting updates.
-    /// NOTE: This function is intended for internal use only and should not be called directly by users.
+    ///
+    /// This method is called by the transaction framework when the transaction is committed.
+    /// It should generate the appropriate [`TableUpdate`]s and [`TableRequirement`]s for
+    /// this action.
     ///
     /// # Arguments
     ///
@@ -44,8 +100,14 @@ pub(crate) trait TransactionAction: AsAny + Sync + Send {
     ///
     /// # Returns
     ///
-    /// An `ActionCommit` containing table updates and table requirements,
+    /// An [`ActionCommit`] containing table updates and table requirements,
     /// or an error if the commit fails.
+    ///
+    /// # Note
+    ///
+    /// This method is typically called by the transaction framework and should not be
+    /// called directly by users. Instead, use [`ApplyTransactionAction::apply`] to add
+    /// actions to a transaction, then call [`Transaction::commit`] to execute all actions.
     async fn commit(self: Arc<Self>, table: &Table) -> Result<ActionCommit>;
 }
 
