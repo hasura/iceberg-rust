@@ -59,7 +59,7 @@ const META_ROOT_PATH: &str = "metadata";
 ///
 /// 3. **Delete Entry Processing**: The `delete_entries()` method is intended for future delete
 ///    operations to specify which manifest entries should be marked as deleted.
-pub(crate) trait SnapshotProduceOperation: Send + Sync {
+pub trait SnapshotProduceOperation: Send + Sync {
     /// Returns the operation type that will be recorded in the snapshot summary.
     ///
     /// This determines what kind of operation is being performed (e.g., `Append`, `Overwrite`),
@@ -87,7 +87,8 @@ pub(crate) trait SnapshotProduceOperation: Send + Sync {
     ) -> impl Future<Output = Result<Vec<ManifestFile>>> + Send;
 }
 
-pub(crate) struct DefaultManifestProcess;
+/// Default implementation of [`ManifestProcess`] that returns manifests unchanged.
+pub struct DefaultManifestProcess;
 
 impl ManifestProcess for DefaultManifestProcess {
     fn process_manifests(
@@ -99,7 +100,21 @@ impl ManifestProcess for DefaultManifestProcess {
     }
 }
 
-pub(crate) trait ManifestProcess: Send + Sync {
+/// A trait for processing manifest files before they are written to a snapshot.
+///
+/// This trait allows customization of how manifest files are processed during snapshot creation.
+/// Implementations can filter, reorder, or otherwise modify the list of manifest files.
+pub trait ManifestProcess: Send + Sync {
+    /// Process a list of manifest files.
+    ///
+    /// # Arguments
+    ///
+    /// * `snapshot_produce` - The snapshot producer context
+    /// * `manifests` - The list of manifest files to process
+    ///
+    /// # Returns
+    ///
+    /// The processed list of manifest files
     fn process_manifests(
         &self,
         snapshot_produce: &SnapshotProducer<'_>,
@@ -107,8 +122,17 @@ pub(crate) trait ManifestProcess: Send + Sync {
     ) -> Vec<ManifestFile>;
 }
 
-pub(crate) struct SnapshotProducer<'a> {
-    pub(crate) table: &'a Table,
+/// A builder for creating new snapshots in an Iceberg table.
+///
+/// `SnapshotProducer` is responsible for creating new snapshots by:
+/// - Managing snapshot metadata (ID, UUID, properties)
+/// - Writing manifest files for added data files
+/// - Combining new and existing manifest files
+/// - Writing the manifest list
+/// - Generating the appropriate table updates and requirements
+pub struct SnapshotProducer<'a> {
+    /// Reference to the table being modified
+    pub table: &'a Table,
     snapshot_id: i64,
     commit_uuid: Uuid,
     key_metadata: Option<Vec<u8>>,
@@ -121,7 +145,16 @@ pub(crate) struct SnapshotProducer<'a> {
 }
 
 impl<'a> SnapshotProducer<'a> {
-    pub(crate) fn new(
+    /// Creates a new `SnapshotProducer`.
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - Reference to the table being modified
+    /// * `commit_uuid` - UUID for this commit operation
+    /// * `key_metadata` - Optional encryption key metadata
+    /// * `snapshot_properties` - Properties to be added to the snapshot summary
+    /// * `added_data_files` - Data files to be added in this snapshot
+    pub fn new(
         table: &'a Table,
         commit_uuid: Uuid,
         key_metadata: Option<Vec<u8>>,
@@ -415,8 +448,25 @@ impl<'a> SnapshotProducer<'a> {
         )
     }
 
-    /// Finished building the action and return the [`ActionCommit`] to the transaction.
-    pub(crate) async fn commit<OP: SnapshotProduceOperation, MP: ManifestProcess>(
+    /// Commits the snapshot by writing manifest files and creating the snapshot metadata.
+    ///
+    /// This method:
+    /// 1. Validates the added data files
+    /// 2. Writes manifest files for the new data
+    /// 3. Combines with existing manifests based on the operation type
+    /// 4. Writes the manifest list
+    /// 5. Creates the new snapshot
+    /// 6. Returns the action commit with updates and requirements
+    ///
+    /// # Arguments
+    ///
+    /// * `snapshot_produce_operation` - The operation type (e.g., Append, Overwrite)
+    /// * `process` - The manifest processor to use
+    ///
+    /// # Returns
+    ///
+    /// An [`ActionCommit`] containing the table updates and requirements
+    pub async fn commit<OP: SnapshotProduceOperation, MP: ManifestProcess>(
         mut self,
         snapshot_produce_operation: OP,
         process: MP,

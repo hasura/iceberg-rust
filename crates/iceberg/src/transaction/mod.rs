@@ -54,7 +54,8 @@ mod action;
 
 pub use action::*;
 mod append;
-mod snapshot;
+/// Snapshot production operations and utilities.
+pub mod snapshot;
 mod sort_order;
 mod update_location;
 mod update_properties;
