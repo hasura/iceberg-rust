@@ -172,7 +172,11 @@ impl<'a> SnapshotProducer<'a> {
         }
     }
 
-    pub(crate) fn validate_added_data_files(&self) -> Result<()> {
+    /// Validate the data files staged for this snapshot against the table's current
+    /// partition spec: every file must be `DataContentType::Data`, its
+    /// `partition_spec_id` must match the table's default partition spec id, and its
+    /// partition value must be compatible with the table's partition type.
+    pub fn validate_added_data_files(&self) -> Result<()> {
         for data_file in &self.added_data_files {
             if data_file.content_type() != crate::spec::DataContentType::Data {
                 return Err(Error::new(
@@ -290,8 +294,8 @@ impl<'a> SnapshotProducer<'a> {
         }
     }
 
-    // Check if the partition value is compatible with the partition type.
-    fn validate_partition_value(
+    /// Check if the partition value is compatible with the partition type.
+    pub fn validate_partition_value(
         partition_value: &Struct,
         partition_type: &StructType,
     ) -> Result<()> {
