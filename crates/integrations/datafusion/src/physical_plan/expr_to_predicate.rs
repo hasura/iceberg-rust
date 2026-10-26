@@ -468,4 +468,35 @@ mod tests {
         let datum = super::scalar_value_to_datum(&ScalarValue::Boolean(None));
         assert_eq!(datum, None);
     }
+
+    #[test]
+    fn test_predicate_conversion_with_bare_boolean_column() {
+        let expr = Expr::Column(datafusion::common::Column::new_unqualified("manualflag"));
+        let predicate = convert_filters_to_predicate(&[expr]);
+        assert_eq!(
+            predicate,
+            Some(Reference::new("manualflag").equal_to(Datum::bool(true)))
+        );
+    }
+
+    #[test]
+    fn test_predicate_conversion_with_negated_boolean_column() {
+        let expr = Expr::Not(Box::new(Expr::Column(
+            datafusion::common::Column::new_unqualified("is_tonu"),
+        )));
+        let predicate = convert_filters_to_predicate(&[expr]);
+        assert_eq!(
+            predicate,
+            Some(Reference::new("is_tonu").equal_to(Datum::bool(false)))
+        );
+    }
+
+    #[test]
+    fn test_predicate_conversion_with_boolean_literals() {
+        for value in [Some(true), Some(false), None] {
+            let expr =
+                datafusion::logical_expr::lit(datafusion::common::ScalarValue::Boolean(value));
+            assert_eq!(convert_filters_to_predicate(&[expr]), None);
+        }
+    }
 }
