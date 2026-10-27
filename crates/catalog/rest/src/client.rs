@@ -26,9 +26,8 @@ use reqwest::{Client, IntoUrl, Method, Request, RequestBuilder, Response};
 use serde::de::DeserializeOwned;
 use tokio::sync::Mutex;
 
-use crate::RequestAuthenticator;
-use crate::RestCatalogConfig;
 use crate::types::{ErrorResponse, TokenResponse};
+use crate::{RequestAuthenticator, RestCatalogConfig};
 
 pub(crate) struct HttpClient {
     client: Client,
