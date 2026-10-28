@@ -57,3 +57,13 @@ mod types;
 
 pub use catalog::*;
 pub use types::*;
+
+/// Custom per-request authentication for a REST catalog.
+///
+/// Returning an error prevents the request from being sent. Implementations
+/// should not expose credentials through their `Debug` representation or errors.
+#[async_trait::async_trait]
+pub trait RequestAuthenticator: std::fmt::Debug + Send + Sync {
+    /// Authenticate a request after catalog headers have been applied.
+    async fn authenticate(&self, request: &mut reqwest::Request) -> iceberg::Result<()>;
+}

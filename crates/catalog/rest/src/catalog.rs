@@ -21,6 +21,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::future::Future;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use iceberg::io::{self, FileIO};
@@ -37,6 +38,7 @@ use reqwest::{Client, Method, StatusCode, Url};
 use tokio::sync::OnceCell;
 use typed_builder::TypedBuilder;
 
+use crate::RequestAuthenticator;
 use crate::client::{
     HttpClient, deserialize_catalog_response, deserialize_unexpected_catalog_error,
 };
@@ -67,6 +69,7 @@ impl Default for RestCatalogBuilder {
             warehouse: None,
             props: HashMap::new(),
             client: None,
+            authenticator: None,
         })
     }
 }
@@ -119,6 +122,17 @@ impl CatalogBuilder for RestCatalogBuilder {
 }
 
 impl RestCatalogBuilder {
+    /// Use custom authentication for every catalog request, including `/v1/config`.
+    ///
+    /// This replaces the built-in static-token/OAuth authentication. The same
+    /// authenticator is retained after loading server configuration and may be
+    /// called concurrently. Configure the HTTP client's redirect policy to avoid
+    /// forwarding credentials outside the intended catalog.
+    pub fn with_authenticator(mut self, authenticator: Arc<dyn RequestAuthenticator>) -> Self {
+        self.0.authenticator = Some(authenticator);
+        self
+    }
+
     /// Configures the catalog with a custom HTTP client.
     pub fn with_client(mut self, client: Client) -> Self {
         self.0.client = Some(client);
@@ -142,6 +156,9 @@ pub(crate) struct RestCatalogConfig {
 
     #[builder(default)]
     client: Option<Client>,
+
+    #[builder(default)]
+    pub(crate) authenticator: Option<Arc<dyn RequestAuthenticator>>,
 }
 
 impl RestCatalogConfig {

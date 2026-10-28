@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
+use std::sync::Arc;
 
 use http::StatusCode;
 use iceberg::{Error, ErrorKind, Result};
@@ -25,8 +26,8 @@ use reqwest::{Client, IntoUrl, Method, Request, RequestBuilder, Response};
 use serde::de::DeserializeOwned;
 use tokio::sync::Mutex;
 
-use crate::RestCatalogConfig;
 use crate::types::{ErrorResponse, TokenResponse};
+use crate::{RequestAuthenticator, RestCatalogConfig};
 
 pub(crate) struct HttpClient {
     client: Client,
@@ -43,6 +44,7 @@ pub(crate) struct HttpClient {
     extra_headers: HeaderMap,
     /// Extra oauth parameters to be added to each authentication request.
     extra_oauth_params: HashMap<String, String>,
+    authenticator: Option<Arc<dyn RequestAuthenticator>>,
 }
 
 impl Debug for HttpClient {
@@ -65,6 +67,7 @@ impl HttpClient {
             credential: cfg.credential(),
             extra_headers,
             extra_oauth_params: cfg.extra_oauth_params(),
+            authenticator: cfg.authenticator.clone(),
         })
     }
 
@@ -92,6 +95,7 @@ impl HttpClient {
             } else {
                 self.extra_oauth_params
             },
+            authenticator: cfg.authenticator.clone().or(self.authenticator),
         })
     }
 
@@ -255,6 +259,13 @@ impl HttpClient {
     // Queries the Iceberg REST catalog after authentication with the given `Request` and
     // returns a `Response`.
     pub async fn query_catalog(&self, mut request: Request) -> Result<Response> {
+        if let Some(authenticator) = &self.authenticator {
+            request.headers_mut().extend(self.extra_headers.clone());
+            authenticator.authenticate(&mut request).await?;
+            // Do not reapply extra_headers after authentication: they could
+            // overwrite the freshly supplied Authorization header.
+            return Ok(self.client.execute(request).await?);
+        }
         self.authenticate(&mut request).await?;
         self.execute(request).await
     }
