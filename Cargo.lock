@@ -3397,6 +3397,7 @@ dependencies = [
  "strum",
  "tempfile",
  "tokio",
+ "tracing",
  "typed-builder",
  "url",
  "uuid",

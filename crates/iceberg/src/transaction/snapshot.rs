@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::ops::RangeFrom;
 
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::error::Result;
@@ -211,18 +212,31 @@ impl<'a> SnapshotProducer<'a> {
         if let Some(current_snapshot) = self.table.metadata().current_snapshot() {
             let manifest_list = current_snapshot
                 .load_manifest_list(self.table.file_io(), &self.table.metadata_ref())
+                .instrument(tracing::info_span!(
+                    "iceberg.transaction.commit.validate_duplicate_files.load_manifest_list"
+                ))
                 .await?;
-            for manifest_list_entry in manifest_list.entries() {
-                let manifest = manifest_list_entry
-                    .load_manifest(self.table.file_io())
-                    .await?;
-                for entry in manifest.entries() {
-                    let file_path = entry.file_path();
-                    if new_files.contains(file_path) && entry.is_alive() {
-                        referenced_files.push(file_path.to_string());
+            let manifest_count = manifest_list.entries().len();
+            referenced_files = async {
+                let mut referenced_files = Vec::new();
+                for manifest_list_entry in manifest_list.entries() {
+                    let manifest = manifest_list_entry
+                        .load_manifest(self.table.file_io())
+                        .await?;
+                    for entry in manifest.entries() {
+                        let file_path = entry.file_path();
+                        if new_files.contains(file_path) && entry.is_alive() {
+                            referenced_files.push(file_path.to_string());
+                        }
                     }
                 }
+                Ok::<_, Error>(referenced_files)
             }
+            .instrument(tracing::info_span!(
+                "iceberg.transaction.commit.validate_duplicate_files.load_manifests",
+                manifest_count
+            ))
+            .await?;
         }
 
         if !referenced_files.is_empty() {
@@ -328,6 +342,7 @@ impl<'a> SnapshotProducer<'a> {
     // Write manifest file for added data files and return the ManifestFile for ManifestList.
     async fn write_added_manifest(&mut self) -> Result<ManifestFile> {
         let added_data_files = std::mem::take(&mut self.added_data_files);
+        let added_data_file_count = added_data_files.len();
         if added_data_files.is_empty() {
             return Err(Error::new(
                 ErrorKind::PreconditionFailed,
@@ -353,7 +368,13 @@ impl<'a> SnapshotProducer<'a> {
         for entry in manifest_entries {
             writer.add_entry(entry)?;
         }
-        writer.write_manifest_file().await
+        writer
+            .write_manifest_file()
+            .instrument(tracing::info_span!(
+                "iceberg.transaction.commit.write_manifest",
+                added_data_file_count
+            ))
+            .await
     }
 
     async fn manifest_file<OP: SnapshotProduceOperation, MP: ManifestProcess>(
@@ -373,7 +394,12 @@ impl<'a> SnapshotProducer<'a> {
             ));
         }
 
-        let existing_manifests = snapshot_produce_operation.existing_manifest(self).await?;
+        let existing_manifests = snapshot_produce_operation
+            .existing_manifest(self)
+            .instrument(tracing::info_span!(
+                "iceberg.transaction.commit.load_existing_manifests"
+            ))
+            .await?;
         let mut manifest_files = existing_manifests;
 
         // Process added entries.
@@ -516,9 +542,16 @@ impl<'a> SnapshotProducer<'a> {
             .manifest_file(&snapshot_produce_operation, &process)
             .await?;
 
+        let manifest_count = new_manifests.len();
         manifest_list_writer.add_manifests(new_manifests.into_iter())?;
         let writer_next_row_id = manifest_list_writer.next_row_id();
-        manifest_list_writer.close().await?;
+        manifest_list_writer
+            .close()
+            .instrument(tracing::info_span!(
+                "iceberg.transaction.commit.write_manifest_list",
+                manifest_count
+            ))
+            .await?;
 
         let commit_ts = chrono::Utc::now().timestamp_millis();
         let new_snapshot = Snapshot::builder()

@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::error::Result;
@@ -84,6 +85,7 @@ impl FastAppendAction {
 #[async_trait]
 impl TransactionAction for FastAppendAction {
     async fn commit(self: Arc<Self>, table: &Table) -> Result<ActionCommit> {
+        let added_data_file_count = self.added_data_files.len();
         let snapshot_producer = SnapshotProducer::new(
             table,
             self.commit_uuid.unwrap_or_else(Uuid::now_v7),
@@ -97,7 +99,13 @@ impl TransactionAction for FastAppendAction {
 
         // Checks duplicate files
         if self.check_duplicate {
-            snapshot_producer.validate_duplicate_files().await?;
+            snapshot_producer
+                .validate_duplicate_files()
+                .instrument(tracing::info_span!(
+                    "iceberg.transaction.commit.validate_duplicate_files",
+                    added_data_file_count
+                ))
+                .await?;
         }
 
         snapshot_producer
