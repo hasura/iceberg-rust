@@ -66,6 +66,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBackoff, ExponentialBuilder, RetryableWithContext};
+use tracing::Instrument;
 
 use crate::error::Result;
 use crate::spec::TableProperties;
@@ -170,15 +171,29 @@ impl Transaction {
             })?;
 
         let backoff = Self::build_backoff(table_props)?;
+        let action_count = self.actions.len();
         let tx = self;
 
-        (|mut tx: Transaction| async {
-            let result = tx.do_commit(catalog).await;
-            (tx, result)
+        (|(mut tx, attempt): (Transaction, u32)| async move {
+            let result = tx
+                .do_commit(catalog)
+                .instrument(tracing::info_span!(
+                    "iceberg.transaction.commit.attempt",
+                    attempt,
+                    action_count
+                ))
+                .await;
+            ((tx, attempt + 1), result)
         })
         .retry(backoff)
-        .sleep(tokio::time::sleep)
-        .context(tx)
+        .sleep(|duration: Duration| {
+            let wait_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+            tokio::time::sleep(duration).instrument(tracing::info_span!(
+                "iceberg.transaction.commit.retry_wait",
+                wait_ms
+            ))
+        })
+        .context((tx, 1))
         .when(|e| e.retryable())
         .await
         .1
@@ -197,7 +212,10 @@ impl Transaction {
     }
 
     async fn do_commit(&mut self, catalog: &dyn Catalog) -> Result<Table> {
-        let refreshed = catalog.load_table(self.table.identifier()).await?;
+        let refreshed = catalog
+            .load_table(self.table.identifier())
+            .instrument(tracing::info_span!("iceberg.transaction.commit.load_table"))
+            .await?;
 
         if self.table.metadata() != refreshed.metadata()
             || self.table.metadata_location() != refreshed.metadata_location()
@@ -210,8 +228,15 @@ impl Transaction {
         let mut existing_updates: Vec<TableUpdate> = vec![];
         let mut existing_requirements: Vec<TableRequirement> = vec![];
 
-        for action in &self.actions {
-            let action_commit = Arc::clone(action).commit(&current_table).await?;
+        for (action_index, action) in self.actions.iter().enumerate() {
+            let action_commit = Arc::clone(action)
+                .commit(&current_table)
+                .instrument(tracing::info_span!(
+                    "iceberg.transaction.commit.action",
+                    action_index,
+                    action_count = self.actions.len()
+                ))
+                .await?;
             // apply action commit to current_table
             current_table = Self::apply(
                 current_table,
@@ -221,13 +246,22 @@ impl Transaction {
             )?;
         }
 
+        let update_count = existing_updates.len();
+        let requirement_count = existing_requirements.len();
         let table_commit = TableCommit::builder()
             .ident(self.table.identifier().to_owned())
             .updates(existing_updates)
             .requirements(existing_requirements)
             .build();
 
-        catalog.update_table(table_commit).await
+        catalog
+            .update_table(table_commit)
+            .instrument(tracing::info_span!(
+                "iceberg.transaction.commit.update_table",
+                update_count,
+                requirement_count
+            ))
+            .await
     }
 }
 
