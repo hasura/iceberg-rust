@@ -103,7 +103,10 @@ impl TransactionAction for FastAppendAction {
                 .validate_duplicate_files()
                 .instrument(tracing::info_span!(
                     "iceberg.transaction.commit.validate_duplicate_files",
-                    added_data_file_count
+                    added_data_file_count,
+                    duplicate_file_count = tracing::field::Empty,
+                    error.type = tracing::field::Empty,
+                    otel.status_code = tracing::field::Empty
                 ))
                 .await?;
         }

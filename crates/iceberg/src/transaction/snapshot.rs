@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::ops::RangeFrom;
 
+use futures::stream::{FuturesUnordered, TryStreamExt};
 use tracing::Instrument;
 use uuid::Uuid;
 
@@ -218,19 +219,33 @@ impl<'a> SnapshotProducer<'a> {
                 .await?;
             let manifest_count = manifest_list.entries().len();
             referenced_files = async {
-                let mut referenced_files = Vec::new();
-                for manifest_list_entry in manifest_list.entries() {
-                    let manifest = manifest_list_entry
-                        .load_manifest(self.table.file_io())
-                        .await?;
-                    for entry in manifest.entries() {
-                        let file_path = entry.file_path();
-                        if new_files.contains(file_path) && entry.is_alive() {
-                            referenced_files.push(file_path.to_string());
-                        }
-                    }
-                }
-                Ok::<_, Error>(referenced_files)
+                let new_files_ref = &new_files;
+                manifest_list
+                    .entries()
+                    .iter()
+                    .cloned()
+                    .map(|entry| {
+                        let file_io = self.table.file_io().clone();
+                        // Backport #2296: this release has a module-level runtime,
+                        // rather than the newer table.runtime().io() API.
+                        crate::runtime::spawn(
+                            async move { entry.load_manifest(&file_io).await }.in_current_span(),
+                        )
+                    })
+                    .collect::<FuturesUnordered<_>>()
+                    .try_fold(Vec::new(), |mut acc, manifest| async move {
+                        acc.extend(
+                            manifest
+                                .entries()
+                                .iter()
+                                .filter(|entry| {
+                                    new_files_ref.contains(entry.file_path()) && entry.is_alive()
+                                })
+                                .map(|entry| entry.file_path().to_string()),
+                        );
+                        Ok(acc)
+                    })
+                    .await
             }
             .instrument(tracing::info_span!(
                 "iceberg.transaction.commit.validate_duplicate_files.load_manifests",
@@ -240,6 +255,21 @@ impl<'a> SnapshotProducer<'a> {
         }
 
         if !referenced_files.is_empty() {
+            let duplicate_file_count = referenced_files.iter().collect::<HashSet<_>>().len();
+            let span = tracing::Span::current();
+            span.record("otel.status_code", "ERROR");
+            span.record("error.type", "duplicate_data_file");
+            span.record("duplicate_file_count", duplicate_file_count as u64);
+            // One stable event per rejected validation attempt, not per manifest.
+            // File paths may contain customer information; record counts and IDs only.
+            tracing::error!(
+                event.name = "iceberg.duplicate_data_file",
+                error.type = "duplicate_data_file",
+                table_uuid = %self.table.metadata().uuid(),
+                duplicate_file_count,
+                added_data_file_count = self.added_data_files.len(),
+                "Iceberg append rejected: data files are already live in the current snapshot"
+            );
             return Err(Error::new(
                 ErrorKind::DataInvalid,
                 format!(
