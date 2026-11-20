@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::ops::RangeFrom;
 
-use futures::stream::{FuturesUnordered, TryStreamExt};
+use futures::stream::{self, StreamExt, TryStreamExt};
 use tracing::Instrument;
 use uuid::Uuid;
 
@@ -35,6 +35,7 @@ use crate::transaction::ActionCommit;
 use crate::{Error, ErrorKind, TableRequirement, TableUpdate};
 
 const META_ROOT_PATH: &str = "metadata";
+const MAX_CONCURRENT_MANIFEST_READS: usize = 8;
 
 /// A trait that defines how different table operations produce new snapshots.
 ///
@@ -220,19 +221,12 @@ impl<'a> SnapshotProducer<'a> {
             let manifest_count = manifest_list.entries().len();
             referenced_files = async {
                 let new_files_ref = &new_files;
-                manifest_list
-                    .entries()
-                    .iter()
-                    .cloned()
+                stream::iter(manifest_list.entries().iter().cloned())
                     .map(|entry| {
                         let file_io = self.table.file_io().clone();
-                        // Backport #2296: this release has a module-level runtime,
-                        // rather than the newer table.runtime().io() API.
-                        crate::runtime::spawn(
-                            async move { entry.load_manifest(&file_io).await }.in_current_span(),
-                        )
+                        async move { entry.load_manifest(&file_io).await }.in_current_span()
                     })
-                    .collect::<FuturesUnordered<_>>()
+                    .buffer_unordered(MAX_CONCURRENT_MANIFEST_READS)
                     .try_fold(Vec::new(), |mut acc, manifest| async move {
                         acc.extend(
                             manifest
