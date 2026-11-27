@@ -186,6 +186,7 @@ impl<'a> TableScanBuilder<'a> {
 
     /// Build the table scan.
     pub fn build(self) -> Result<TableScan> {
+        let is_time_travel = self.snapshot_id.is_some();
         let snapshot = match self.snapshot_id {
             Some(snapshot_id) => self
                 .table
@@ -216,7 +217,13 @@ impl<'a> TableScanBuilder<'a> {
             }
         };
 
-        let schema = snapshot.schema(self.table.metadata())?;
+        // A scan of the current state uses the table's current schema; time travel uses the
+        // schema its snapshot was written with. Backport of apache/iceberg-rust#3260.
+        let schema = if is_time_travel {
+            snapshot.schema(self.table.metadata())?
+        } else {
+            self.table.metadata().current_schema().clone()
+        };
 
         // Check that all column names exist in the schema (skip reserved columns).
         if let Some(column_names) = self.column_names.as_ref() {
@@ -1478,6 +1485,73 @@ pub mod tests {
 
         assert_eq!(batches[0].num_columns(), 0);
         assert_eq!(batches[0].num_rows(), 1024);
+    }
+
+    /// Adds `extra` (an optional string column) as a new current schema, as a
+    /// schema-only commit would, leaving the snapshots unchanged.
+    fn add_current_schema_column(table: &mut Table, extra: &str) {
+        let mut metadata = table.metadata().clone();
+        let current = metadata.current_schema().clone();
+        let mut fields: Vec<_> = current.as_struct().fields().to_vec();
+        let field_id = current.highest_field_id().max(metadata.last_column_id) + 1;
+        fields.push(Arc::new(NestedField::optional(
+            field_id,
+            extra,
+            Type::Primitive(PrimitiveType::String),
+        )));
+        let schema_id = current.schema_id() + 1;
+        let schema = Schema::builder()
+            .with_schema_id(schema_id)
+            .with_fields(fields)
+            .build()
+            .unwrap();
+        metadata.schemas.insert(schema_id, Arc::new(schema));
+        metadata.current_schema_id = schema_id;
+        metadata.last_column_id = field_id;
+        *table = table.clone().with_metadata(Arc::new(metadata));
+    }
+
+    #[tokio::test]
+    async fn test_current_scan_reads_a_column_added_without_new_data() {
+        let mut fixture = TableTestFixture::new();
+        fixture.setup_manifest_files().await;
+        add_current_schema_column(&mut fixture.table, "added");
+
+        let table_scan = fixture.table.scan().select(["x", "added"]).build().unwrap();
+        let batches: Vec<_> = table_scan
+            .to_arrow()
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+
+        let x = batches[0].column_by_name("x").unwrap();
+        assert_eq!(
+            x.as_primitive::<arrow_array::types::Int64Type>().value(0),
+            1
+        );
+        let added = batches[0].column_by_name("added").unwrap();
+        assert_eq!(added.null_count(), added.len(), "old files read NULL");
+
+        let all = fixture.table.scan().build().unwrap();
+        let batches: Vec<_> = all.to_arrow().await.unwrap().try_collect().await.unwrap();
+        assert!(batches[0].column_by_name("added").is_some());
+    }
+
+    #[test]
+    fn test_time_travel_scan_keeps_the_snapshot_schema() {
+        let mut table = TableTestFixture::new().table;
+        add_current_schema_column(&mut table, "added");
+        let current_snapshot_id = table.metadata().current_snapshot().unwrap().snapshot_id();
+
+        let err = table
+            .scan()
+            .snapshot_id(current_snapshot_id)
+            .select(["added"])
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("Column added not found"), "{err}");
     }
 
     #[tokio::test]
